@@ -61,6 +61,128 @@ def filter_truthy(input_list):
         the search_results.html template '''
     return [item for item in input_list if item]
 
+def search(term='', user=None, sort='id', order='desc', category='0_0', quality_filter='0', page=1, rss=False, admin=False):
+    sort_keys = {
+        'id': models.Torrent.id,
+        'size': models.Torrent.filesize,
+        'name': models.Torrent.display_name,
+        'seeders': models.Statistic.seed_count,
+        'leechers': models.Statistic.leech_count,
+        'downloads': models.Statistic.download_count
+    }
+
+    sort_ = sort.lower()
+    if sort_ not in sort_keys:
+        flask.abort(400)
+    sort = sort_keys[sort]
+
+    order_keys = {
+        'desc': 'desc',
+        'asc': 'asc'
+    }
+
+    order_ = order.lower()
+    if order_ not in order_keys:
+        flask.abort(400)
+
+    filter_keys = {
+        '0': None,
+        '1': (models.TorrentFlags.REMAKE, False),
+        '2': (models.TorrentFlags.TRUSTED, True),
+        '3': (models.TorrentFlags.COMPLETE, True)
+    }
+
+    sentinel = object()
+    filter_tuple = filter_keys.get(quality_filter.lower(), sentinel)
+    if filter_tuple is sentinel:
+        flask.abort(400)
+
+    if user:
+        user = models.User.by_id(user)
+        if not user:
+            flask.abort(404)
+        user = user.id
+
+    main_category = None
+    sub_category = None
+    main_cat_id = 0
+    sub_cat_id = 0
+    if category:
+        cat_match = re.match(r'^(\d+)_(\d+)$', category)
+        if not cat_match:
+            flask.abort(400)
+
+        main_cat_id = int(cat_match.group(1))
+        sub_cat_id = int(cat_match.group(2))
+
+        if main_cat_id > 0:
+            if sub_cat_id > 0:
+                sub_category = models.SubCategory.by_category_ids(main_cat_id, sub_cat_id)
+            else:
+                main_category = models.MainCategory.by_id(main_cat_id)
+
+            if not category:
+                flask.abort(400)
+
+    # Force sort by id desc if rss
+    if rss:
+        sort = sort_keys['id']
+        order = 'desc'
+        page = 1
+
+    same_user = False
+    if flask.g.user:
+        same_user = flask.g.user.id == user
+
+    if term:
+        query = db.session.query(models.TorrentNameSearch)
+    else:
+        query = models.Torrent.query
+
+    # Filter by user
+    if user:
+        query = query.filter(models.Torrent.uploader_id == user)
+        # If admin, show everything
+        if not admin:
+            # If user is not logged in or the accessed feed doesn't belong to user,
+            # hide anonymous torrents belonging to the queried user
+            if not same_user:
+                query = query.filter(models.Torrent.flags.op('&')(
+                    int(models.TorrentFlags.ANONYMOUS | models.TorrentFlags.DELETED)).is_(False))
+
+    if main_category:
+        query = query.filter(models.Torrent.main_category_id == main_cat_id)
+    elif sub_category:
+        query = query.filter((models.Torrent.main_category_id == main_cat_id) &
+                             (models.Torrent.sub_category_id == sub_cat_id))
+
+    if filter_tuple:
+        query = query.filter(models.Torrent.flags.op('&')(int(filter_tuple[0])).is_(filter_tuple[1]))
+
+    # If admin, show everything
+    if not admin:
+        query = query.filter(models.Torrent.flags.op('&')(
+            int(models.TorrentFlags.HIDDEN | models.TorrentFlags.DELETED)).is_(False))
+
+    if term:
+        for item in shlex.split(term, posix=False):
+            if len(item) >= 2:
+                query = query.filter(FullTextSearch(
+                    item, models.TorrentNameSearch, FullTextMode.NATURAL))
+
+    # Sort and order
+    if sort.class_ != models.Torrent:
+        query = query.join(sort.class_)
+
+    query = query.order_by(getattr(sort, order)())
+
+    if rss:
+        query = query.limit(app.config['RESULTS_PER_PAGE'])
+    else:
+        query = query.paginate_faste(page, per_page=app.config['RESULTS_PER_PAGE'], step=5)
+
+    return query
+
 
 @app.template_global()
 def category_name(cat_id):
@@ -576,6 +698,7 @@ def upload():
 @app.route('/view/<int:torrent_id>')
 def view_torrent(torrent_id):
     torrent = models.Torrent.by_id(torrent_id)
+    form = forms.CommentForm()
 
     viewer = flask.g.user
 
@@ -593,10 +716,41 @@ def view_torrent(torrent_id):
     if torrent.filelist:
         files = json.loads(torrent.filelist.filelist_blob.decode('utf-8'))
 
+    if flask.g.user is not None and flask.g.user.is_admin:
+        comments = models.Comment.query.filter(models.Comment.torrent == torrent_id)
+    else:
+        comments = models.Comment.query.filter(models.Comment.torrent == torrent_id,
+                                               models.Comment.deleted == False)
+
+    comment_count = comments.count()
+
     return flask.render_template('view.html', torrent=torrent,
                                  files=files,
                                  viewer=viewer,
+                                 form=form,
+                                 comments=comments,
+                                 comment_count=comment_count,
                                  can_edit=can_edit)
+
+
+@app.route('/view/<int:torrent_id>/submit_comment', methods=['POST'])
+def submit_comment(torrent_id):
+    form = forms.CommentForm(flask.request.form)
+
+    if flask.request.method == 'POST' and form.validate():
+        comment_text = (form.comment.data or '').strip()
+
+        # Null entry for User just means Anonymous
+        current_user_id = flask.g.user.id if flask.g.user else None
+        comment = models.Comment(
+            torrent=torrent_id,
+            user_id=current_user_id,
+            text=comment_text)
+
+        db.session.add(comment)
+        db.session.commit()
+
+    return flask.redirect(flask.url_for('view_torrent', torrent_id=torrent_id))
 
 
 @app.route('/view/<int:torrent_id>/edit', methods=['GET', 'POST'])
