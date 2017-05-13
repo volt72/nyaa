@@ -61,6 +61,7 @@ def filter_truthy(input_list):
         the search_results.html template '''
     return [item for item in input_list if item]
 
+
 def search(term='', user=None, sort='id', order='desc', category='0_0', quality_filter='0', page=1, rss=False, admin=False):
     sort_keys = {
         'id': models.Torrent.id,
