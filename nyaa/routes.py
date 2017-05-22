@@ -158,7 +158,8 @@ def search(term='', user=None, sort='id', order='desc', category='0_0', quality_
                              (models.Torrent.sub_category_id == sub_cat_id))
 
     if filter_tuple:
-        query = query.filter(models.Torrent.flags.op('&')(int(filter_tuple[0])).is_(filter_tuple[1]))
+        query = query.filter(models.Torrent.flags.op('&')(
+            int(filter_tuple[0])).is_(filter_tuple[1]))
 
     # If admin, show everything
     if not admin:
@@ -741,7 +742,7 @@ def submit_comment(torrent_id):
             current_user_id = None
         else:
             current_user_id = flask.g.user.id
-            
+
         comment = models.Comment(
             torrent=torrent_id,
             user_id=current_user_id,
@@ -752,6 +753,7 @@ def submit_comment(torrent_id):
 
     return flask.redirect(flask.url_for('view_torrent', torrent_id=torrent_id))
 
+
 @app.route('/view/<int:torrent_id>/delete_comment/<int:comment_id>')
 def delete_comment(torrent_id, comment_id):
     if flask.g.user is not None and flask.g.user.is_admin:
@@ -759,8 +761,8 @@ def delete_comment(torrent_id, comment_id):
         db.session.commit()
     else:
         flask.abort(403)
-    
-    return flask.redirect(flask.url_for('view_torrent', torrent_id=torrent_id))     
+
+    return flask.redirect(flask.url_for('view_torrent', torrent_id=torrent_id))
 
 
 @app.route('/view/<int:torrent_id>/edit', methods=['GET', 'POST'])
@@ -938,3 +940,33 @@ def api_upload():
         return flask.make_response(flask.jsonify({"Failure": "Invalid username or password."}), 400)
     api_response = api_handler.api_upload(flask.request, user)
     return api_response
+
+
+# Modified from: http://flask.pocoo.org/snippets/33/
+@app.template_filter()
+def timesince(dt, default='just now'):
+    """
+    Returns string representing "time since" e.g.
+    3 minutes ago, 5 hours ago etc.
+    Date and time (UTC) are returned if older than 1 day.
+    """
+
+    now = datetime.utcnow()
+    diff = now - dt
+
+    periods = (
+        (diff.days, 'day', 'days'),
+        (diff.seconds / 3600, 'hour', 'hours'),
+        (diff.seconds / 60, 'minute', 'minutes'),
+        (diff.seconds, 'second', 'seconds'),
+    )
+
+    if diff.days >= 1:
+        return dt.strftime('%Y-%m-%d %H:%M UTC')
+    else:
+        for period, singular, plural in periods:
+
+            if period >= 1:
+                return '%d %s ago' % (period, singular if period == 1 else plural)
+
+    return default
